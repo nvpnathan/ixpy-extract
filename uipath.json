@@ -1,0 +1,149 @@
+{
+  "$schema": "https://cloud.uipath.com/draft/2024-12/uipath",
+  "entryPoints": [
+    {
+      "filePath": "main.py",
+      "uniqueId": "0c72417c-ced4-421a-a2a5-517fbdf43b5d",
+      "type": "agent",
+      "input": {
+        "type": "object",
+        "properties": {
+          "bucket_name": {
+            "type": "string",
+            "description": "UiPath storage bucket name that contains the document."
+          },
+          "blob_file_path": {
+            "type": "string",
+            "description": "Path of the file inside the storage bucket."
+          },
+          "folder_path": {
+            "type": "string",
+            "description": "Optional Orchestrator folder path where the bucket resides."
+          },
+          "project_type": {
+            "type": "string",
+            "description": "Project flavor. Use MODERN or IXP when extracting without classification_results."
+          },
+          "project_name": {
+            "type": "string",
+            "description": "DU Modern or IXP project name. Required when classification_results are not provided."
+          },
+          "project_tag": {
+            "type": "string",
+            "description": "Published tag (for example staging, live). Required when classification_results are not provided."
+          },
+          "document_type_name": {
+            "type": "string",
+            "description": "Required when project_type is MODERN or PRETRAINED and classification_results are not provided."
+          },
+          "classification_results": {
+            "type": "array",
+            "description": "List of classification results to reuse for extraction instead of classifying again.",
+            "items": {
+              "type": "object",
+              "description": "ClassificationResult"
+            }
+          },
+          "validated_classification_action": {
+            "type": "object",
+            "description": "Validation action used to retrieve validated classification results when validate_classification is true."
+          },
+          "validate_classification": {
+            "type": "boolean",
+            "description": "When true, fetch validated classification results from the provided validated_classification_action."
+          },
+          "validate_extraction": {
+            "type": "boolean",
+            "description": "When true, create a validation action for the extraction results."
+          },
+          "action_title": {
+            "type": "string",
+            "description": "Title for the validation action."
+          },
+          "action_priority": {
+            "type": "string",
+            "description": "Priority for the validation action (LOW, MEDIUM, HIGH, CRITICAL)."
+          },
+          "action_catalog": {
+            "type": "string",
+            "description": "Action catalog name for the validation action."
+          },
+          "action_folder": {
+            "type": "string",
+            "description": "Folder where the validation action should be created."
+          },
+          "storage_bucket_name": {
+            "type": "string",
+            "description": "Storage bucket name used for validation actions."
+          },
+          "storage_bucket_directory_path": {
+            "type": "string",
+            "description": "Directory path in the storage bucket for validation actions."
+          }
+        },
+        "required": []
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "bucket_name": {
+            "type": "string",
+            "description": "UiPath storage bucket name that contains the document when provided."
+          },
+          "blob_file_path": {
+            "type": "string",
+            "description": "Path of the file inside the storage bucket when provided."
+          },
+          "project_type": {
+            "type": "string",
+            "description": "Project flavor used for extraction."
+          },
+          "project_name": {
+            "type": "string",
+            "description": "DU Modern or IXP project name when applicable."
+          },
+          "project_tag": {
+            "type": "string",
+            "description": "Published tag when applicable."
+          },
+          "document_type_id": {
+            "type": "string",
+            "description": "Document type identifier returned by extraction."
+          },
+          "document_id": {
+            "type": "string",
+            "description": "Document identifier returned by extraction."
+          },
+          "extraction_results": {
+            "type": "object",
+            "description": "Extraction results returned by UiPath Documents."
+          },
+          "validation_action": {
+            "type": "object",
+            "description": "ValidateExtractionAction created when validate_extraction is true."
+          }
+        },
+        "required": [
+          "extraction_results"
+        ]
+      }
+    }
+  ],
+"bindings": {
+    "version": "2.0",
+    "resources": []
+  },
+  "runtimeOptions": {
+    "isConversational": false
+  },
+  "packOptions": {
+    "fileExtensionsIncluded": [],
+    "filesIncluded": [],
+    "filesExcluded": [],
+    "directoriesExcluded": [],
+    "includeUvLock": true
+  },
+  "functions": {
+    "main.py": "main.py:main"
+  }
+}

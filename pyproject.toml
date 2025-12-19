@@ -1,0 +1,10 @@
+[project]
+name = "ixpy-extract"
+version = "0.1.5"
+authors = [{ name = "Nathan Ness" }]
+description = "IXP Extraction Agent"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "uipath>=2.2.36",
+]
