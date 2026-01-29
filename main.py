@@ -5,6 +5,7 @@ import secrets
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import UUID
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError, model_validator
@@ -25,18 +26,22 @@ load_dotenv()
 sdk = UiPath()
 
 
+class FileResource(BaseModel):
+    model_config = {"populate_by_name": True}
+
+    id: str = Field(..., alias="ID", description="Resource ID (UUID string).")
+    full_name: Optional[str] = Field(None, alias="FullName", description="File name.")
+    mime_type: Optional[str] = Field(None, alias="MimeType", description="MIME type.")
+    metadata: Optional[Dict[str, Any]] = Field(
+        None, alias="Metadata", description="Metadata map."
+    )
+
+
 class Input(BaseModel):
     """Input contract that UiPath coded agents expect."""
 
-    bucket_name: str = Field(
-        description="UiPath storage bucket name that contains the document."
-    )
-    blob_file_path: str = Field(
-        description="Path of the file inside the storage bucket."
-    )
-    folder_path: Optional[str] = Field(
-        default=None,
-        description="Optional Orchestrator folder path where the bucket resides.",
+    file_resource: FileResource = Field(
+        ..., description="UiPath IResource descriptor for a Data Service file."
     )
     project_type: str = Field(
         description="Project flavor. Use PRETRAINED, MODERN, or IXP."
@@ -115,8 +120,7 @@ class Input(BaseModel):
             missing = [
                 name
                 for name, value in {
-                    "bucket_name": self.bucket_name,
-                    "blob_file_path": self.blob_file_path,
+                    "file_resource": self.file_resource,
                     "project_type": self.project_type,
                 }.items()
                 if not value
@@ -174,8 +178,6 @@ Input.model_rebuild()
 class Output(BaseModel):
     """Structured output returned to UiPath."""
 
-    bucket_name: Optional[str]
-    blob_file_path: Optional[str]
     project_type: Optional[str]
     project_name: Optional[str] = None
     project_tag: Optional[str] = None
@@ -216,27 +218,39 @@ def _parse_action_priority(priority: Optional[str]) -> ActionPriority:
         ) from exc
 
 
-def _build_action_title(blob_file_path: str, override: Optional[str]) -> str:
+def _file_resource_filename(file_resource: FileResource) -> str:
+    """Resolve a stable filename for the file resource."""
+    if file_resource.full_name:
+        return Path(file_resource.full_name).name
+    return f"resource-{file_resource.id}"
+
+
+def _parse_resource_id(resource_id: str) -> UUID:
+    try:
+        return UUID(resource_id)
+    except ValueError as exc:
+        raise ValueError(
+            f"file_resource.ID must be a valid UUID string. Received: {resource_id}"
+        ) from exc
+
+
+def _build_action_title(file_name: str, override: Optional[str]) -> str:
     """Create a unique validation action title using the file name and a short hex suffix."""
     if override:
         return override
-    filename = Path(blob_file_path).name
+    filename = Path(file_name).name
     suffix = f"{secrets.randbelow(16**3):03X}"
-    return f"Validate Classification - {filename} - {suffix}"
+    return f"Validate Extraction - {filename} - {suffix}"
 
 
-async def _download_from_bucket(
-    bucket_name: str,
-    blob_file_path: str,
+async def _download_file_resource(
+    file_resource: FileResource,
     destination_path: Path,
-    folder_path: Optional[str],
 ) -> Path:
-    """Download a file from UiPath storage buckets asynchronously."""
-    await sdk.buckets.download_async(
-        name=bucket_name,
-        blob_file_path=blob_file_path,
+    """Download a Data Service file resource asynchronously."""
+    await sdk.attachments.download_async(
+        key=_parse_resource_id(file_resource.id),
         destination_path=str(destination_path),
-        folder_path=folder_path,
     )
     return destination_path
 
@@ -270,6 +284,7 @@ async def _extract_document(
 
 async def _run_async(input_data: Input) -> Output:
     classification_result: Optional[ClassificationResult] = None
+    file_name = _file_resource_filename(input_data.file_resource)
     if (
         input_data.validate_classification
         and input_data.validated_classification_action
@@ -304,17 +319,14 @@ async def _run_async(input_data: Input) -> Output:
     else:
         project_type_enum = _parse_project_type(input_data.project_type)
         with tempfile.TemporaryDirectory() as tmp_dir:
-            destination_path = Path(tmp_dir) / Path(input_data.blob_file_path).name  # type: ignore[arg-type]
+            destination_path = Path(tmp_dir) / file_name
             logger.info(
-                "Downloading %s from bucket %s",
-                input_data.blob_file_path,
-                input_data.bucket_name,
+                "Downloading file resource %s",
+                input_data.file_resource.id,
             )
-            downloaded_path = await _download_from_bucket(
-                input_data.bucket_name,  # type: ignore[arg-type]
-                input_data.blob_file_path,  # type: ignore[arg-type]
+            downloaded_path = await _download_file_resource(
+                input_data.file_resource,
                 destination_path,
-                input_data.folder_path,
             )
 
             logger.info(
@@ -333,7 +345,8 @@ async def _run_async(input_data: Input) -> Output:
     if input_data.validate_extraction:
         priority_enum = _parse_action_priority(input_data.action_priority)
         action_title = _build_action_title(
-            input_data.blob_file_path, input_data.action_title
+            file_name,
+            input_data.action_title,
         )
         logger.info("Creating validation action for extraction results")
         validation_action = await sdk.documents.create_validate_extraction_action_async(
@@ -355,8 +368,6 @@ async def _run_async(input_data: Input) -> Output:
     )
 
     return Output(
-        bucket_name=input_data.bucket_name,
-        blob_file_path=input_data.blob_file_path,
         project_type=project_type_value,
         project_name=input_data.project_name,
         project_tag=input_data.project_tag,

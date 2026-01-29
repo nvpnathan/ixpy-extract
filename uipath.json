@@ -8,17 +8,28 @@
       "input": {
         "type": "object",
         "properties": {
-          "bucket_name": {
-            "type": "string",
-            "description": "UiPath storage bucket name that contains the document."
-          },
-          "blob_file_path": {
-            "type": "string",
-            "description": "Path of the file inside the storage bucket."
-          },
-          "folder_path": {
-            "type": "string",
-            "description": "Optional Orchestrator folder path where the bucket resides."
+          "file_resource": {
+            "type": "object",
+            "description": "UiPath IResource descriptor for a Data Service file.",
+            "properties": {
+              "ID": {
+                "type": "string",
+                "description": "Resource ID (UUID string)."
+              },
+              "FullName": {
+                "type": "string",
+                "description": "File name."
+              },
+              "MimeType": {
+                "type": "string",
+                "description": "MIME type."
+              },
+              "Metadata": {
+                "type": "object",
+                "description": "Metadata map."
+              }
+            },
+            "required": ["ID"]
           },
           "project_type": {
             "type": "string",
@@ -81,19 +92,14 @@
             "description": "Directory path in the storage bucket for validation actions."
           }
         },
-        "required": []
+        "required": [
+          "file_resource",
+          "project_type"
+        ]
       },
       "output": {
         "type": "object",
         "properties": {
-          "bucket_name": {
-            "type": "string",
-            "description": "UiPath storage bucket name that contains the document when provided."
-          },
-          "blob_file_path": {
-            "type": "string",
-            "description": "Path of the file inside the storage bucket when provided."
-          },
           "project_type": {
             "type": "string",
             "description": "Project flavor used for extraction."
