@@ -44,8 +44,13 @@ class PipelineExtractionProject(BaseModel):
     project_type: str = Field(
         ..., description="Extraction project type (PRETRAINED, MODERN, IXP)."
     )
+    project_version: Optional[int] = Field(
+        default=None,
+        description="Published project version (integer). Required for MODERN or IXP extraction.",
+    )
     project_tag: Optional[str] = Field(
-        default=None, description="Published tag (for example staging, live)."
+        default=None,
+        description="Published tag (legacy). Use project_version for MODERN or IXP extraction.",
     )
     id: Optional[str] = Field(
         default=None, description="Extraction project ID (UUID string)."
@@ -112,7 +117,11 @@ class Input(BaseModel):
     )
     project_tag: Optional[str] = Field(
         default=None,
-        description="Published tag (for example staging, live). Required when project_type is not PRETRAINED.",
+        description="Published tag (legacy). Use project_version for MODERN or IXP extraction.",
+    )
+    project_version: Optional[int] = Field(
+        default=None,
+        description="Published project version (integer). Required when project_type is MODERN or IXP.",
     )
     pipeline_json: Annotated[
         Optional[PipelineConfig],
@@ -201,7 +210,7 @@ class Input(BaseModel):
                     name
                     for name, value in {
                         "project_name": self.project_name,
-                        "project_tag": self.project_tag,
+                        "project_version": self.project_version,
                     }.items()
                     if not value
                 ]
@@ -369,6 +378,7 @@ async def _extract_document(
     project_type: ProjectType,
     project_name: Optional[str],
     project_tag: Optional[str],
+    project_version: Optional[int],
     document_type_name: Optional[str],
     file_path: Path,
 ) -> ExtractionResponse:
@@ -376,6 +386,7 @@ async def _extract_document(
         project_type=project_type,
         project_name=project_name,
         tag=project_tag,
+        version=project_version,
         document_type_name=document_type_name,
         file_path=str(file_path),
     )
@@ -405,6 +416,7 @@ async def _run_async(input_data: Input) -> Output:
     project_type_enum: Optional[ProjectType] = None
     project_name: Optional[str] = None
     project_tag: Optional[str] = input_data.project_tag
+    project_version: Optional[int] = input_data.project_version
     document_type_name: Optional[str] = None
     extraction_response: ExtractionResponse
 
@@ -420,7 +432,16 @@ async def _run_async(input_data: Input) -> Output:
         project_type_enum = _parse_project_type(extraction_project.project_type)
         project_name = extraction_project.name
         project_tag = extraction_project.project_tag or project_tag
-        if project_type_enum == ProjectType.PRETRAINED:
+        project_version = extraction_project.project_version or project_version
+        if project_type_enum in (ProjectType.MODERN, ProjectType.IXP):
+            if project_version is None:
+                raise ValueError(
+                    "project_version is required for MODERN or IXP extraction projects."
+                )
+            project_tag = None
+        elif project_type_enum == ProjectType.PRETRAINED:
+            project_tag = None
+            project_version = None
             document_type_name = matched_key
     else:
         project_type_enum = _parse_project_type(input_data.project_type)
@@ -429,6 +450,14 @@ async def _run_async(input_data: Input) -> Output:
             document_type_name = _resolve_pretrained_document_type(
                 input_data.pipeline_json
             )
+            project_tag = None
+            project_version = None
+        else:
+            if project_version is None:
+                raise ValueError(
+                    "project_version is required for MODERN or IXP extraction."
+                )
+            project_tag = None
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         destination_path = Path(tmp_dir) / file_name
@@ -446,6 +475,7 @@ async def _run_async(input_data: Input) -> Output:
             project_type_enum,
             project_name,
             project_tag,
+            project_version,
             document_type_name,
             downloaded_path,
         )

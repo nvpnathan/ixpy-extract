@@ -41,7 +41,11 @@
           },
           "project_tag": {
             "type": "string",
-            "description": "Published tag (for example staging, live). Required when classification_results are not provided."
+            "description": "Published tag (legacy). Use project_version for MODERN or IXP extraction."
+          },
+          "project_version": {
+            "type": "integer",
+            "description": "Published project version (integer). Required when project_type is MODERN or IXP."
           },
           "pipeline_json": {
             "type": "object",
@@ -82,9 +86,13 @@
                       "type": "string",
                       "description": "Extraction project type (PRETRAINED, MODERN, IXP)."
                     },
+                    "project_version": {
+                      "type": "integer",
+                      "description": "Published project version (integer). Required for MODERN or IXP extraction."
+                    },
                     "project_tag": {
                       "type": "string",
-                      "description": "Published tag (for example staging, live)."
+                      "description": "Published tag (legacy). Use project_version for MODERN or IXP extraction."
                     },
                     "extractor_id": {
                       "type": "string",
