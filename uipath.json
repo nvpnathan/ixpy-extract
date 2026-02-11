@@ -33,7 +33,7 @@
           },
           "project_type": {
             "type": "string",
-            "description": "Project flavor. Use MODERN or IXP when extracting without classification_results."
+            "description": "Project flavor. Use PRETRAINED, MODERN, or IXP when extracting without classification_results."
           },
           "project_name": {
             "type": "string",
@@ -43,9 +43,78 @@
             "type": "string",
             "description": "Published tag (for example staging, live). Required when classification_results are not provided."
           },
-          "document_type_name": {
-            "type": "string",
-            "description": "Required when project_type is MODERN or PRETRAINED and classification_results are not provided."
+          "pipeline_json": {
+            "type": "object",
+            "description": "Pipeline configuration containing extraction_projects mapped by document type.",
+            "properties": {
+              "project_id": {
+                "type": "string",
+                "description": "Classification project ID."
+              },
+              "project_name": {
+                "type": "string",
+                "description": "Classification project name."
+              },
+              "project_type": {
+                "type": "string",
+                "description": "Classification project type."
+              },
+              "classifier_id": {
+                "type": "string",
+                "description": "Classifier identifier."
+              },
+              "extraction_projects": {
+                "type": "object",
+                "description": "Map of document type keys to extraction projects.",
+                "additionalProperties": {
+                  "type": "object",
+                  "description": "Extraction project configuration.",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "description": "Extraction project ID (UUID string)."
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "Extraction project name."
+                    },
+                    "project_type": {
+                      "type": "string",
+                      "description": "Extraction project type (PRETRAINED, MODERN, IXP)."
+                    },
+                    "project_tag": {
+                      "type": "string",
+                      "description": "Published tag (for example staging, live)."
+                    },
+                    "extractor_id": {
+                      "type": "string",
+                      "description": "Extractor identifier for the project."
+                    }
+                  },
+                  "required": ["name", "project_type"]
+                }
+              },
+              "validate_classification": {
+                "type": "boolean",
+                "description": "Pipeline setting for classification validation."
+              },
+              "validate_extraction": {
+                "type": "boolean",
+                "description": "Pipeline setting for extraction validation."
+              },
+              "validate_extraction_later": {
+                "type": "boolean",
+                "description": "Pipeline setting for delayed extraction validation."
+              },
+              "perform_classification": {
+                "type": "boolean",
+                "description": "Pipeline setting for classification."
+              },
+              "perform_extraction": {
+                "type": "boolean",
+                "description": "Pipeline setting for extraction."
+              }
+            }
           },
           "classification_results": {
             "type": "array",
@@ -93,8 +162,7 @@
           }
         },
         "required": [
-          "file_resource",
-          "project_type"
+          "file_resource"
         ]
       },
       "output": {

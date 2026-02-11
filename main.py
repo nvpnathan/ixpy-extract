@@ -4,7 +4,7 @@ import logging
 import secrets
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 from uuid import UUID
 
 from dotenv import load_dotenv
@@ -37,14 +37,74 @@ class FileResource(BaseModel):
     )
 
 
+class PipelineExtractionProject(BaseModel):
+    model_config = {"populate_by_name": True}
+
+    name: str = Field(..., description="Extraction project name.")
+    project_type: str = Field(
+        ..., description="Extraction project type (PRETRAINED, MODERN, IXP)."
+    )
+    project_tag: Optional[str] = Field(
+        default=None, description="Published tag (for example staging, live)."
+    )
+    id: Optional[str] = Field(
+        default=None, description="Extraction project ID (UUID string)."
+    )
+    extractor_id: Optional[str] = Field(
+        default=None, description="Extractor identifier for the project."
+    )
+
+
+class PipelineConfig(BaseModel):
+    model_config = {"populate_by_name": True}
+
+    project_id: Optional[str] = Field(
+        default=None, description="Classification project ID."
+    )
+    project_name: Optional[str] = Field(
+        default=None, description="Classification project name."
+    )
+    project_type: Optional[str] = Field(
+        default=None, description="Classification project type."
+    )
+    classifier_id: Optional[str] = Field(
+        default=None, description="Classifier identifier."
+    )
+    extraction_projects: Dict[str, PipelineExtractionProject] = Field(
+        default_factory=dict,
+        description=(
+            "Map of document type keys to extraction projects. Keys must match "
+            "classification_results document types."
+        ),
+    )
+    validate_classification: Optional[bool] = Field(
+        default=None, description="Pipeline setting for classification validation."
+    )
+    validate_extraction: Optional[bool] = Field(
+        default=None, description="Pipeline setting for extraction validation."
+    )
+    validate_extraction_later: Optional[bool] = Field(
+        default=None, description="Pipeline setting for delayed extraction validation."
+    )
+    perform_classification: Optional[bool] = Field(
+        default=None, description="Pipeline setting for classification."
+    )
+    perform_extraction: Optional[bool] = Field(
+        default=None, description="Pipeline setting for extraction."
+    )
+
+
 class Input(BaseModel):
     """Input contract that UiPath coded agents expect."""
+
+    model_config = {"populate_by_name": True}
 
     file_resource: FileResource = Field(
         ..., description="UiPath IResource descriptor for a Data Service file."
     )
-    project_type: str = Field(
-        description="Project flavor. Use PRETRAINED, MODERN, or IXP."
+    project_type: Optional[str] = Field(
+        default=None,
+        description="Project flavor. Use PRETRAINED, MODERN, or IXP when extracting without classification_results.",
     )
     project_name: Optional[str] = Field(
         default=None,
@@ -54,10 +114,15 @@ class Input(BaseModel):
         default=None,
         description="Published tag (for example staging, live). Required when project_type is not PRETRAINED.",
     )
-    document_type_name: Optional[str] = Field(
-        default=None,
-        description="Required when project_type is MODERN or PRETRAINED and classification_results are not provided.",
-    )
+    pipeline_json: Annotated[
+        Optional[PipelineConfig],
+        Field(
+            alias="pipelineJSON",
+            description=(
+                "Pipeline configuration containing extraction_projects mapped by document type."
+            ),
+        ),
+    ] = None
     validate_extraction: bool = Field(
         default=False,
         description="When true, create a validation action for the extraction results.",
@@ -145,12 +210,19 @@ class Input(BaseModel):
                         f"{', '.join(project_missing)} are required for {project_type_enum.value} projects when classification_results are not provided."
                     )
 
-            if (
-                project_type_enum in {ProjectType.MODERN, ProjectType.PRETRAINED}
-                and not self.document_type_name
-            ):
+            if project_type_enum == ProjectType.PRETRAINED:
+                if not self.pipeline_json or not self.pipeline_json.extraction_projects:
+                    raise ValueError(
+                        "pipeline_json.extraction_projects is required for PRETRAINED extraction when classification_results are not provided."
+                    )
+                if len(self.pipeline_json.extraction_projects) != 1:
+                    raise ValueError(
+                        "pipeline_json.extraction_projects must contain exactly one entry for PRETRAINED extraction when classification_results are not provided."
+                    )
+        else:
+            if not self.pipeline_json or not self.pipeline_json.extraction_projects:
                 raise ValueError(
-                    "document_type_name is required for DU Modern and PRETRAINED extraction when classification_results are not provided."
+                    "pipeline_json.extraction_projects is required when classification_results are provided or validate_classification is true."
                 )
 
         if self.validate_extraction:
@@ -218,6 +290,44 @@ def _parse_action_priority(priority: Optional[str]) -> ActionPriority:
         ) from exc
 
 
+def _classification_document_type_key(
+    classification_result: ClassificationResult,
+) -> str:
+    for attr in ("document_type_id", "document_type_name", "document_type"):
+        value = getattr(classification_result, attr, None)
+        if value:
+            return value
+    raise ValueError("Classification result did not include a document type key.")
+
+
+def _resolve_extraction_project(
+    pipeline_json: PipelineConfig, document_type_key: str
+) -> tuple[str, PipelineExtractionProject]:
+    extraction_projects = pipeline_json.extraction_projects or {}
+    if document_type_key in extraction_projects:
+        return document_type_key, extraction_projects[document_type_key]
+    normalized = document_type_key.strip().lower()
+    for key, project in extraction_projects.items():
+        if key.strip().lower() == normalized:
+            return key, project
+    available = ", ".join(extraction_projects.keys())
+    raise ValueError(
+        f"No extraction project configured for document type '{document_type_key}'. Available: {available}"
+    )
+
+
+def _resolve_pretrained_document_type(pipeline_json: Optional[PipelineConfig]) -> str:
+    if not pipeline_json or not pipeline_json.extraction_projects:
+        raise ValueError(
+            "pipeline_json.extraction_projects is required to derive document_type_name for PRETRAINED extraction."
+        )
+    if len(pipeline_json.extraction_projects) != 1:
+        raise ValueError(
+            "pipeline_json.extraction_projects must contain exactly one entry to derive document_type_name for PRETRAINED extraction."
+        )
+    return next(iter(pipeline_json.extraction_projects.keys()))
+
+
 def _file_resource_filename(file_resource: FileResource) -> str:
     """Resolve a stable filename for the file resource."""
     if file_resource.full_name:
@@ -256,23 +366,12 @@ async def _download_file_resource(
 
 
 async def _extract_document(
-    project_type: Optional[ProjectType],
+    project_type: ProjectType,
     project_name: Optional[str],
     project_tag: Optional[str],
     document_type_name: Optional[str],
-    file_path: Optional[Path],
-    classification_result: Optional[ClassificationResult],
+    file_path: Path,
 ) -> ExtractionResponse:
-    if classification_result:
-        return await sdk.documents.extract_async(
-            classification_result=classification_result,
-        )
-
-    if not file_path:
-        raise ValueError(
-            "file_path is required when classification_results are not provided."
-        )
-
     return await sdk.documents.extract_async(
         project_type=project_type,
         project_name=project_name,
@@ -304,42 +403,52 @@ async def _run_async(input_data: Input) -> Output:
     elif input_data.classification_results:
         classification_result = input_data.classification_results[0]
     project_type_enum: Optional[ProjectType] = None
+    project_name: Optional[str] = None
+    project_tag: Optional[str] = input_data.project_tag
+    document_type_name: Optional[str] = None
     extraction_response: ExtractionResponse
 
     if classification_result:
-        logger.info("Reusing supplied classification results for extraction.")
-        extraction_response = await _extract_document(
-            project_type=None,
-            project_name=None,
-            project_tag=None,
-            document_type_name=None,
-            file_path=None,
-            classification_result=classification_result,
+        if not input_data.pipeline_json:
+            raise ValueError(
+                "pipeline_json is required when classification_results are provided."
+            )
+        document_type_key = _classification_document_type_key(classification_result)
+        matched_key, extraction_project = _resolve_extraction_project(
+            input_data.pipeline_json, document_type_key
         )
+        project_type_enum = _parse_project_type(extraction_project.project_type)
+        project_name = extraction_project.name
+        project_tag = extraction_project.project_tag or project_tag
+        if project_type_enum == ProjectType.PRETRAINED:
+            document_type_name = matched_key
     else:
         project_type_enum = _parse_project_type(input_data.project_type)
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            destination_path = Path(tmp_dir) / file_name
-            logger.info(
-                "Downloading file resource %s",
-                input_data.file_resource.id,
-            )
-            downloaded_path = await _download_file_resource(
-                input_data.file_resource,
-                destination_path,
+        project_name = input_data.project_name
+        if project_type_enum == ProjectType.PRETRAINED:
+            document_type_name = _resolve_pretrained_document_type(
+                input_data.pipeline_json
             )
 
-            logger.info(
-                "Extracting document with project_type=%s", project_type_enum.value
-            )
-            extraction_response = await _extract_document(
-                project_type_enum,
-                input_data.project_name,
-                input_data.project_tag,
-                input_data.document_type_name,
-                downloaded_path,
-                classification_result=None,
-            )
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        destination_path = Path(tmp_dir) / file_name
+        logger.info(
+            "Downloading file resource %s",
+            input_data.file_resource.id,
+        )
+        downloaded_path = await _download_file_resource(
+            input_data.file_resource,
+            destination_path,
+        )
+
+        logger.info("Extracting document with project_type=%s", project_type_enum.value)
+        extraction_response = await _extract_document(
+            project_type_enum,
+            project_name,
+            project_tag,
+            document_type_name,
+            downloaded_path,
+        )
 
     validation_action = None
     if input_data.validate_extraction:
@@ -369,8 +478,8 @@ async def _run_async(input_data: Input) -> Output:
 
     return Output(
         project_type=project_type_value,
-        project_name=input_data.project_name,
-        project_tag=input_data.project_tag,
+        project_name=project_name,
+        project_tag=project_tag,
         document_type_id=extraction_response.document_type_id,
         document_id=extraction_response.extraction_result.document_id,
         extraction_results=extraction_response.extraction_result.model_dump(
