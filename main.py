@@ -103,6 +103,18 @@ class PipelineConfig(BaseModel):
         default=None, description="Pipeline setting for extraction."
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_extraction_projects(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if data.get("extraction_projects") is None:
+            legacy = data.get("extraction_project_extractors")
+            if legacy is not None:
+                data = dict(data)
+                data["extraction_projects"] = legacy
+        return data
+
 
 class InputClassificationResult(BaseModel):
     model_config = {"populate_by_name": True, "extra": "allow"}
@@ -239,7 +251,6 @@ class Input(BaseModel):
                 name
                 for name, value in {
                     "file_resource": self.file_resource,
-                    "project_type": self.project_type,
                 }.items()
                 if not value
             ]
@@ -248,30 +259,82 @@ class Input(BaseModel):
                     f"Missing required fields when classification_results are not provided: {', '.join(missing)}"
                 )
 
-            project_type_enum = _parse_project_type(self.project_type)
-            if project_type_enum != ProjectType.PRETRAINED:
-                project_missing = [
-                    name
-                    for name, value in {
-                        "project_name": self.project_name,
-                        "project_version": self.project_version,
-                    }.items()
-                    if not value
-                ]
-                if project_missing:
-                    raise ValueError(
-                        f"{', '.join(project_missing)} are required for {project_type_enum.value} projects when classification_results are not provided."
-                    )
+            extraction_projects = (
+                self.pipeline_json.extraction_projects
+                if self.pipeline_json and self.pipeline_json.extraction_projects
+                else {}
+            )
+            single_extraction_project = len(extraction_projects) == 1
 
-            if project_type_enum == ProjectType.PRETRAINED:
-                if not self.pipeline_json or not self.pipeline_json.extraction_projects:
+            if single_extraction_project:
+                extraction_project = next(iter(extraction_projects.values()))
+                project_type_enum = _parse_project_type(extraction_project.project_type)
+                if project_type_enum == ProjectType.MODERN:
+                    if not extraction_project.document_type_name:
+                        raise ValueError(
+                            "pipeline_json.extraction_projects[<key>].document_type_name is required for MODERN extraction when classification_results are not provided."
+                        )
+                    if (
+                        extraction_project.project_version is None
+                        and not extraction_project.project_tag
+                        and self.project_version is None
+                        and not self.project_tag
+                    ):
+                        raise ValueError(
+                            "project_version or project_tag is required for MODERN extraction when classification_results are not provided."
+                        )
+                elif project_type_enum == ProjectType.PRETRAINED:
+                    if (
+                        not extraction_project.document_type_name
+                        and not extraction_project.extractor_id
+                    ):
+                        raise ValueError(
+                            "pipeline_json.extraction_projects[<key>].document_type_name or extractor_id is required for PRETRAINED extraction when classification_results are not provided."
+                        )
+                else:
+                    if (
+                        extraction_project.project_version is None
+                        and not extraction_project.project_tag
+                        and self.project_version is None
+                        and not self.project_tag
+                    ):
+                        raise ValueError(
+                            "project_version or project_tag is required for IXP extraction when classification_results are not provided."
+                        )
+            else:
+                if not self.project_type:
                     raise ValueError(
-                        "pipeline_json.extraction_projects is required for PRETRAINED extraction when classification_results are not provided."
+                        "project_type is required when classification_results are not provided and pipeline_json.extraction_projects does not contain exactly one entry."
                     )
-                if len(self.pipeline_json.extraction_projects) != 1:
-                    raise ValueError(
-                        "pipeline_json.extraction_projects must contain exactly one entry for PRETRAINED extraction when classification_results are not provided."
-                    )
+                project_type_enum = _parse_project_type(self.project_type)
+                if project_type_enum != ProjectType.PRETRAINED:
+                    project_missing = [
+                        name
+                        for name, value in {
+                            "project_name": self.project_name,
+                        }.items()
+                        if not value
+                    ]
+                    if project_missing:
+                        raise ValueError(
+                            f"{', '.join(project_missing)} are required for {project_type_enum.value} projects when classification_results are not provided."
+                        )
+                    if self.project_version is None and not self.project_tag:
+                        raise ValueError(
+                            f"project_version or project_tag is required for {project_type_enum.value} projects when classification_results are not provided."
+                        )
+                else:
+                    if (
+                        not self.pipeline_json
+                        or not self.pipeline_json.extraction_projects
+                    ):
+                        raise ValueError(
+                            "pipeline_json.extraction_projects is required for PRETRAINED extraction when classification_results are not provided."
+                        )
+                    if len(self.pipeline_json.extraction_projects) != 1:
+                        raise ValueError(
+                            "pipeline_json.extraction_projects must contain exactly one entry for PRETRAINED extraction when classification_results are not provided."
+                        )
         else:
             if not self.pipeline_json or not self.pipeline_json.extraction_projects:
                 raise ValueError(
@@ -576,17 +639,39 @@ async def _run_async(input_data: Input) -> Output:
                 matched_key=matched_key,
             )
     else:
-        project_type_enum = _parse_project_type(input_data.project_type)
-        project_name = input_data.project_name
-        if project_type_enum == ProjectType.PRETRAINED:
-            document_type_name = _resolve_pretrained_document_type(
-                input_data.pipeline_json
-            )
-        else:
-            if project_version is None and not project_tag:
-                raise ValueError(
-                    "project_version or project_tag is required for MODERN or IXP extraction."
+        extraction_projects = (
+            input_data.pipeline_json.extraction_projects
+            if input_data.pipeline_json and input_data.pipeline_json.extraction_projects
+            else {}
+        )
+        if len(extraction_projects) == 1:
+            matched_key, extraction_project = next(iter(extraction_projects.items()))
+            project_type_enum = _parse_project_type(extraction_project.project_type)
+            project_name = extraction_project.name
+            project_tag = extraction_project.project_tag or project_tag
+            project_version = extraction_project.project_version or project_version
+            if project_type_enum == ProjectType.MODERN:
+                document_type_name = _resolve_modern_document_type(
+                    extraction_project=extraction_project,
+                    matched_key=matched_key,
                 )
+            elif project_type_enum == ProjectType.PRETRAINED:
+                document_type_name = _resolve_pretrained_document_type_from_project(
+                    extraction_project=extraction_project,
+                    matched_key=matched_key,
+                )
+        else:
+            project_type_enum = _parse_project_type(input_data.project_type)
+            project_name = input_data.project_name
+            if project_type_enum == ProjectType.PRETRAINED:
+                document_type_name = _resolve_pretrained_document_type(
+                    input_data.pipeline_json
+                )
+            else:
+                if project_version is None and not project_tag:
+                    raise ValueError(
+                        "project_version or project_tag is required for MODERN or IXP extraction."
+                    )
 
     if project_type_enum is None:
         raise ValueError("Unable to determine project_type for extraction.")
