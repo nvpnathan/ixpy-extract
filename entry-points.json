@@ -98,6 +98,10 @@
                     "extractor_id": {
                       "type": "string",
                       "description": "Extractor identifier for the project."
+                    },
+                    "document_type_name": {
+                      "type": "string",
+                      "description": "Document type name used for extraction (required for MODERN; used for PRETRAINED when provided)."
                     }
                   },
                   "required": ["name", "project_type"]

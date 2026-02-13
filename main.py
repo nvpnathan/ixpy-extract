@@ -58,6 +58,11 @@ class PipelineExtractionProject(BaseModel):
     extractor_id: Optional[str] = Field(
         default=None, description="Extractor identifier for the project."
     )
+    document_type_name: Optional[str] = Field(
+        default=None,
+        alias="documentTypeName",
+        description="Document type name used for extraction (required for MODERN; used for PRETRAINED when provided).",
+    )
 
 
 class PipelineConfig(BaseModel):
@@ -97,6 +102,45 @@ class PipelineConfig(BaseModel):
     perform_extraction: Optional[bool] = Field(
         default=None, description="Pipeline setting for extraction."
     )
+
+
+class InputClassificationResult(BaseModel):
+    model_config = {"populate_by_name": True, "extra": "allow"}
+
+    document_type_id: Optional[str] = Field(
+        default=None,
+        alias="DocumentTypeId",
+        description="Document type identifier from classification.",
+    )
+    document_type_name: Optional[str] = Field(
+        default=None,
+        alias="DocumentTypeName",
+        description="Document type name from classification.",
+    )
+    document_type: Optional[str] = Field(
+        default=None,
+        alias="DocumentType",
+        description="Document type fallback field from classification.",
+    )
+    classifier_id: Optional[str] = Field(
+        default=None,
+        alias="ClassifierId",
+        description="Classifier identifier when available.",
+    )
+
+    @model_validator(mode="after")
+    def validate_document_type(self) -> "InputClassificationResult":
+        if not any(
+            (
+                self.document_type_id,
+                self.document_type_name,
+                self.document_type,
+            )
+        ):
+            raise ValueError(
+                "classification_results entries must include DocumentTypeId, DocumentTypeName, or DocumentType."
+            )
+        return self
 
 
 class Input(BaseModel):
@@ -166,7 +210,7 @@ class Input(BaseModel):
         default="/",
         description="Directory path in the storage bucket for validation actions.",
     )
-    classification_results: Optional[List[ClassificationResult]] = Field(
+    classification_results: Optional[List[InputClassificationResult]] = Field(
         default=None,
         description="Optional classification results to reuse for extraction instead of providing project and file inputs.",
     )
@@ -271,6 +315,9 @@ class Output(BaseModel):
 Output.model_rebuild()
 
 
+ClassificationResultValue = ClassificationResult | InputClassificationResult
+
+
 def _parse_project_type(project_type: Optional[str]) -> ProjectType:
     if not project_type:
         raise ValueError(
@@ -300,7 +347,7 @@ def _parse_action_priority(priority: Optional[str]) -> ActionPriority:
 
 
 def _classification_document_type_key(
-    classification_result: ClassificationResult,
+    classification_result: ClassificationResultValue,
 ) -> str:
     for attr in ("document_type_id", "document_type_name", "document_type"):
         value = getattr(classification_result, attr, None)
@@ -316,12 +363,28 @@ def _resolve_extraction_project(
     if document_type_key in extraction_projects:
         return document_type_key, extraction_projects[document_type_key]
     normalized = document_type_key.strip().lower()
+
+    # First pass: key-level relaxed match.
     for key, project in extraction_projects.items():
         if key.strip().lower() == normalized:
             return key, project
+
+    # Second pass: match by project metadata fields often found in classification results.
+    for key, project in extraction_projects.items():
+        candidates = (
+            project.id,
+            project.extractor_id,
+            project.document_type_name,
+        )
+        for candidate in candidates:
+            if candidate and candidate.strip().lower() == normalized:
+                return key, project
+
     available = ", ".join(extraction_projects.keys())
     raise ValueError(
-        f"No extraction project configured for document type '{document_type_key}'. Available: {available}"
+        f"No extraction project configured for document type '{document_type_key}'. "
+        f"Available keys: {available}. Matching also checks extraction project 'id', "
+        "'extractor_id', and 'document_type_name'."
     )
 
 
@@ -334,7 +397,37 @@ def _resolve_pretrained_document_type(pipeline_json: Optional[PipelineConfig]) -
         raise ValueError(
             "pipeline_json.extraction_projects must contain exactly one entry to derive document_type_name for PRETRAINED extraction."
         )
-    return next(iter(pipeline_json.extraction_projects.keys()))
+    extraction_project = next(iter(pipeline_json.extraction_projects.values()))
+    if extraction_project.document_type_name:
+        return extraction_project.document_type_name
+    if not extraction_project.extractor_id:
+        raise ValueError(
+            "document_type_name or extractor_id is required in pipeline_json.extraction_projects for PRETRAINED extraction."
+        )
+    return extraction_project.extractor_id
+
+
+def _resolve_modern_document_type(
+    extraction_project: PipelineExtractionProject,
+    matched_key: str,
+) -> str:
+    if extraction_project.document_type_name:
+        return extraction_project.document_type_name
+    raise ValueError(
+        f"document_type_name is required for MODERN extraction project '{matched_key}'."
+    )
+
+
+def _resolve_pretrained_document_type_from_project(
+    extraction_project: PipelineExtractionProject, matched_key: str
+) -> str:
+    if extraction_project.document_type_name:
+        return extraction_project.document_type_name
+    if extraction_project.extractor_id:
+        return extraction_project.extractor_id
+    raise ValueError(
+        f"document_type_name or extractor_id is required for PRETRAINED extraction project '{matched_key}'."
+    )
 
 
 def _file_resource_filename(file_resource: FileResource) -> str:
@@ -392,8 +485,47 @@ async def _extract_document(
     )
 
 
+def _apply_extract_argument_rules(
+    project_type: ProjectType,
+    project_name: Optional[str],
+    project_tag: Optional[str],
+    project_version: Optional[int],
+    document_type_name: Optional[str],
+) -> tuple[
+    Optional[str],
+    Optional[str],
+    Optional[int],
+    Optional[str],
+]:
+    if project_type == ProjectType.PRETRAINED:
+        if not document_type_name:
+            raise ValueError(
+                "document_type_name is required for PRETRAINED extraction."
+            )
+        return None, None, None, document_type_name
+
+    if project_type == ProjectType.MODERN:
+        if not project_name:
+            raise ValueError("project_name is required for MODERN extraction.")
+        if not document_type_name:
+            raise ValueError("document_type_name is required for MODERN extraction.")
+        if (project_version is None) == (project_tag is None):
+            raise ValueError(
+                "Exactly one of project_version or project_tag is required for MODERN extraction."
+            )
+        return project_name, project_tag, project_version, document_type_name
+
+    if not project_name:
+        raise ValueError("project_name is required for IXP extraction.")
+    if (project_version is None) == (project_tag is None):
+        raise ValueError(
+            "Exactly one of project_version or project_tag is required for IXP extraction."
+        )
+    return project_name, project_tag, project_version, None
+
+
 async def _run_async(input_data: Input) -> Output:
-    classification_result: Optional[ClassificationResult] = None
+    classification_result: Optional[ClassificationResultValue] = None
     file_name = _file_resource_filename(input_data.file_resource)
     if (
         input_data.validate_classification
@@ -433,16 +565,16 @@ async def _run_async(input_data: Input) -> Output:
         project_name = extraction_project.name
         project_tag = extraction_project.project_tag or project_tag
         project_version = extraction_project.project_version or project_version
-        if project_type_enum in (ProjectType.MODERN, ProjectType.IXP):
-            if project_version is None:
-                raise ValueError(
-                    "project_version is required for MODERN or IXP extraction projects."
-                )
-            project_tag = None
+        if project_type_enum == ProjectType.MODERN:
+            document_type_name = _resolve_modern_document_type(
+                extraction_project=extraction_project,
+                matched_key=matched_key,
+            )
         elif project_type_enum == ProjectType.PRETRAINED:
-            project_tag = None
-            project_version = None
-            document_type_name = matched_key
+            document_type_name = _resolve_pretrained_document_type_from_project(
+                extraction_project=extraction_project,
+                matched_key=matched_key,
+            )
     else:
         project_type_enum = _parse_project_type(input_data.project_type)
         project_name = input_data.project_name
@@ -450,14 +582,24 @@ async def _run_async(input_data: Input) -> Output:
             document_type_name = _resolve_pretrained_document_type(
                 input_data.pipeline_json
             )
-            project_tag = None
-            project_version = None
         else:
-            if project_version is None:
+            if project_version is None and not project_tag:
                 raise ValueError(
-                    "project_version is required for MODERN or IXP extraction."
+                    "project_version or project_tag is required for MODERN or IXP extraction."
                 )
-            project_tag = None
+
+    if project_type_enum is None:
+        raise ValueError("Unable to determine project_type for extraction.")
+
+    project_name, project_tag, project_version, document_type_name = (
+        _apply_extract_argument_rules(
+            project_type=project_type_enum,
+            project_name=project_name,
+            project_tag=project_tag,
+            project_version=project_version,
+            document_type_name=document_type_name,
+        )
+    )
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         destination_path = Path(tmp_dir) / file_name
